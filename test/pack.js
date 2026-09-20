@@ -1,6 +1,7 @@
 import t from 'tap'
 import { Pack, PackSync } from '../dist/esm/pack.js'
 import fs from 'fs'
+import net from 'net'
 import path, { resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { Parser } from '../src/parse.js'
@@ -1959,3 +1960,88 @@ t.test('avoid permanent link deferral', async t => {
     new Set(['pkgB/index.js', 'pkgB/foo.js', 'pkgB/dist/index.js']),
   )
 })
+
+t.test(
+  'skips sockets so a later file still packs (#295)',
+  { skip: isWindows && 'unix sockets', timeout: 8000 },
+  async t => {
+    const cwd = t.testdir({
+      'aaa.txt': 'hello\n',
+    })
+    const servers = await Promise.all(
+      ['b.sock', 'c.sock'].map(
+        name =>
+          new Promise((resolve, reject) => {
+            const sock = path.join(cwd, name)
+            try {
+              fs.unlinkSync(sock)
+            } catch {}
+            const server = net.createServer()
+            server.on('error', reject)
+            server.listen(sock, () => resolve(server))
+          }),
+      ),
+    )
+    t.teardown(() => {
+      for (const server of servers) {
+        server.close()
+      }
+    })
+
+    const namesFrom = data => {
+      const names = []
+      for (let i = 0; i + 512 <= data.length; ) {
+        const block = data.subarray(i, i + 512)
+        if (block.every(b => b === 0)) {
+          break
+        }
+        const h = new Header(block)
+        if (h.path) {
+          names.push(h.path)
+        }
+        i += 512 + 512 * Math.ceil((h.size || 0) / 512)
+      }
+      return names
+    }
+
+    // Delay lstat of the regular file so the two sockets are processed
+    // as read-ahead while the file is still the queue head. On unfixed
+    // Pack, their empty WriteEntry 'end' makes JOBDONE shift() the file
+    // off the queue and aaa.txt never gets packed.
+    const { Pack: SlowPack } = await t.mockImport('../src/pack.js', {
+      fs: t.createMock(fs, {
+        readdir: (p, cb) => cb(null, ['aaa.txt', 'b.sock', 'c.sock']),
+        lstat: (p, cb) => {
+          if (String(p).includes('aaa.txt')) {
+            setTimeout(() => fs.lstat(p, cb), 100)
+          } else {
+            fs.lstat(p, cb)
+          }
+        },
+      }),
+    })
+
+    const out = []
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Pack hung')), 4000)
+      new SlowPack({ cwd })
+        .end('.')
+        .on('data', c => out.push(c))
+        .on('end', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+        .on('error', reject)
+    })
+    t.strictSame(namesFrom(Buffer.concat(out)).sort(), ['./', './aaa.txt'])
+
+    const sync = new PackSync({ cwd })
+    const sout = []
+    sync.on('data', c => sout.push(c))
+    sync.end('.')
+    t.strictSame(namesFrom(Buffer.concat(sout)).sort(), [
+      './',
+      './aaa.txt',
+    ])
+  },
+)

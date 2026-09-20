@@ -1,5 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import net from 'node:net'
+import os from 'node:os'
 import { mkdirp } from 'mkdirp'
 import path from 'node:path'
 import { rimraf } from 'rimraf'
@@ -363,3 +365,93 @@ t.test('transform a filename', async t => {
   ).concat()
   t.equal(data.subarray(0, 'bloorg.md'.length).toString(), 'bloorg.md')
 })
+
+const listenUnix = (sockPath: string) =>
+  new Promise<net.Server>((resolve, reject) => {
+    try {
+      fs.unlinkSync(sockPath)
+    } catch {}
+    const server = net.createServer()
+    server.on('error', reject)
+    server.listen(sockPath, () => resolve(server))
+  })
+
+const listPaths = (file: string) => {
+  const found: string[] = []
+  list({
+    file,
+    sync: true,
+    onReadEntry: entry => {
+      found.push(entry.path)
+      entry.resume()
+    },
+  })
+  return found
+}
+
+// File-first + two sockets is the hang: WriteEntry ends unsupported
+// types with no header, JOBDONE shift()s the queue head, and create()
+// never finishes. One socket after a file does not stall.
+t.test(
+  'create skips unix sockets and does not hang (#295)',
+  {
+    skip: isWindows && 'unix sockets',
+    timeout: 10000,
+  },
+  async t => {
+    const expect = ['./', './aaa.txt']
+
+    const check = (t: Test, file: string) => {
+      const found = listPaths(file)
+      t.strictSame([...found].sort(), [...expect].sort())
+      t.notOk(
+        found.some(p => p.endsWith('.sock')),
+        'sockets are not archived',
+      )
+    }
+
+    const setupTree = async () => {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'node-tar-295-'))
+      fs.writeFileSync(path.join(cwd, 'aaa.txt'), 'hello\n')
+      const servers = await Promise.all([
+        listenUnix(path.join(cwd, 'b.sock')),
+        listenUnix(path.join(cwd, 'c.sock')),
+      ])
+      t.teardown(() => {
+        for (const server of servers) {
+          server.close()
+        }
+        fs.rmSync(cwd, { recursive: true, force: true })
+      })
+      return cwd
+    }
+
+    t.test('async file', async t => {
+      const cwd = await setupTree()
+      const file = path.resolve(dir, 'sockets-async.tar')
+      await c({ file, cwd }, ['.'])
+      check(t, file)
+    })
+
+    t.test('sync file', async t => {
+      const cwd = await setupTree()
+      const file = path.resolve(dir, 'sockets-sync.tar')
+      c({ file, cwd, sync: true }, ['.'])
+      check(t, file)
+    })
+
+    t.test('gzip file (issue reproduction)', async t => {
+      const cwd = await setupTree()
+      const file = path.resolve(dir, 'sockets.tar.gz')
+      await c({ file, cwd, gzip: true }, ['.'])
+      check(t, file)
+    })
+
+    t.test('socket as sole entry', async t => {
+      const cwd = await setupTree()
+      const file = path.resolve(dir, 'socket-only.tar')
+      await c({ file, cwd }, ['b.sock'])
+      t.strictSame(listPaths(file), [])
+    })
+  },
+)
