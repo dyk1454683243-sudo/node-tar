@@ -1972,9 +1972,13 @@ t.test(
       ['b.sock', 'c.sock'].map(
         name =>
           new Promise((resolve, reject) => {
+            const sock = path.join(cwd, name)
+            try {
+              fs.unlinkSync(sock)
+            } catch {}
             const server = net.createServer()
             server.on('error', reject)
-            server.listen(path.join(cwd, name), () => resolve(server))
+            server.listen(sock, () => resolve(server))
           }),
       ),
     )
@@ -1991,22 +1995,42 @@ t.test(
         if (block.every(b => b === 0)) {
           break
         }
-        const name = new Header(block).path
-        const size = new Header(block).size || 0
-        if (name) {
-          names.push(name)
+        const h = new Header(block)
+        if (h.path) {
+          names.push(h.path)
         }
-        i += 512 + 512 * Math.ceil(size / 512)
+        i += 512 + 512 * Math.ceil((h.size || 0) / 512)
       }
       return names
     }
 
+    // Delay lstat of the regular file so the two sockets are processed
+    // as read-ahead while the file is still the queue head. On unfixed
+    // Pack, their empty WriteEntry 'end' makes JOBDONE shift() the file
+    // off the queue and aaa.txt never gets packed.
+    const { Pack: SlowPack } = await t.mockImport('../src/pack.js', {
+      fs: t.createMock(fs, {
+        readdir: (p, cb) => cb(null, ['aaa.txt', 'b.sock', 'c.sock']),
+        lstat: (p, cb) => {
+          if (String(p).includes('aaa.txt')) {
+            setTimeout(() => fs.lstat(p, cb), 100)
+          } else {
+            fs.lstat(p, cb)
+          }
+        },
+      }),
+    })
+
     const out = []
     await new Promise((resolve, reject) => {
-      new Pack({ cwd })
+      const timer = setTimeout(() => reject(new Error('Pack hung')), 4000)
+      new SlowPack({ cwd })
         .end('.')
         .on('data', c => out.push(c))
-        .on('end', resolve)
+        .on('end', () => {
+          clearTimeout(timer)
+          resolve()
+        })
         .on('error', reject)
     })
     t.strictSame(namesFrom(Buffer.concat(out)).sort(), ['./', './aaa.txt'])

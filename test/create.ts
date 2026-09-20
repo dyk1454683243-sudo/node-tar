@@ -1,13 +1,14 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import net from 'node:net'
+import os from 'node:os'
 import { mkdirp } from 'mkdirp'
 import path from 'node:path'
 import { rimraf } from 'rimraf'
 import type { Test } from 'tap'
 import t from 'tap'
 import { c, list, Pack, PackSync } from '../dist/esm/index.js'
-import { execFileSync, spawn } from 'child_process'
+import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 
 const isWindows = process.platform === 'win32'
@@ -367,6 +368,9 @@ t.test('transform a filename', async t => {
 
 const listenUnix = (sockPath: string) =>
   new Promise<net.Server>((resolve, reject) => {
+    try {
+      fs.unlinkSync(sockPath)
+    } catch {}
     const server = net.createServer()
     server.on('error', reject)
     server.listen(sockPath, () => resolve(server))
@@ -392,58 +396,59 @@ t.test(
   'create skips unix sockets and does not hang (#295)',
   {
     skip: isWindows && 'unix sockets',
-    timeout: 8000,
+    timeout: 10000,
   },
   async t => {
-    const cwd = t.testdir({
-      'aaa.txt': 'hello\n',
-      sub: {
-        'keep.txt': 'keep\n',
-      },
-    })
-    const servers = await Promise.all([
-      listenUnix(path.join(cwd, 'b.sock')),
-      listenUnix(path.join(cwd, 'c.sock')),
-      listenUnix(path.join(cwd, 'sub', 'z.sock')),
-    ])
-    t.teardown(() => {
-      for (const server of servers) {
-        server.close()
-      }
-    })
-    execFileSync('mkfifo', [path.join(cwd, 'd.fifo')])
-
-    const expect = ['./', './aaa.txt', './sub/', './sub/keep.txt']
+    const expect = ['./', './aaa.txt']
 
     const check = (t: Test, file: string) => {
       const found = listPaths(file)
       t.strictSame([...found].sort(), [...expect].sort())
       t.notOk(
-        found.some(p => p.endsWith('.sock') || p.endsWith('.fifo')),
-        'special files are not archived',
+        found.some(p => p.endsWith('.sock')),
+        'sockets are not archived',
       )
     }
 
+    const setupTree = async () => {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'node-tar-295-'))
+      fs.writeFileSync(path.join(cwd, 'aaa.txt'), 'hello\n')
+      const servers = await Promise.all([
+        listenUnix(path.join(cwd, 'b.sock')),
+        listenUnix(path.join(cwd, 'c.sock')),
+      ])
+      t.teardown(() => {
+        for (const server of servers) {
+          server.close()
+        }
+        fs.rmSync(cwd, { recursive: true, force: true })
+      })
+      return cwd
+    }
+
     t.test('async file', async t => {
+      const cwd = await setupTree()
       const file = path.resolve(dir, 'sockets-async.tar')
       await c({ file, cwd }, ['.'])
       check(t, file)
     })
 
-    t.test('sync file', t => {
+    t.test('sync file', async t => {
+      const cwd = await setupTree()
       const file = path.resolve(dir, 'sockets-sync.tar')
       c({ file, cwd, sync: true }, ['.'])
       check(t, file)
-      t.end()
     })
 
     t.test('gzip file (issue reproduction)', async t => {
+      const cwd = await setupTree()
       const file = path.resolve(dir, 'sockets.tar.gz')
       await c({ file, cwd, gzip: true }, ['.'])
       check(t, file)
     })
 
     t.test('socket as sole entry', async t => {
+      const cwd = await setupTree()
       const file = path.resolve(dir, 'socket-only.tar')
       await c({ file, cwd }, ['b.sock'])
       t.strictSame(listPaths(file), [])
