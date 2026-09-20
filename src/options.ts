@@ -178,7 +178,8 @@ export interface TarOptions {
    * entry path. For example, with `{strip: 2}`, the entry `a/b/c/d` would be
    * extracted to `{cwd}/c/d`.
    *
-   * Any entry whose entire path is stripped will be excluded.
+   * Any entry whose entire path is stripped will be excluded, and will
+   * not change ownership, mode, or mtime of the extraction directory.
    */
   strip?: number
 

@@ -524,9 +524,11 @@ The following options are supported:
   symlink that would affect the location of an extracted file. [Alias:
   `U`]
 - `strip` Remove the specified number of leading path elements.
-  Pathnames with fewer elements will be silently skipped. Note that
-  the pathname is edited after applying the filter, but before
-  security checks. [Alias: `strip-components`, `stripComponents`]
+  Pathnames with fewer elements, or whose names become empty after
+  stripping, are silently skipped and do not change the extraction
+  directory. Note that the pathname is edited after applying the
+  filter, but before security checks. [Alias: `strip-components`,
+  `stripComponents`]
 - `preserveOwner` If true, tar will set the `uid` and `gid` of
   extracted entries to the `uid` and `gid` fields in the archive.
   This defaults to true when run as root, and false otherwise. If
@@ -856,9 +858,10 @@ Most unpack errors will cause a `warn` event to be emitted. If the
   With this option, existing hardlinks will be broken, as will any
   symlink that would affect the location of an extracted file.
 - `strip` Remove the specified number of leading path elements.
-  Pathnames with fewer elements will be silently skipped. Note that
-  the pathname is edited after applying the filter, but before
-  security checks.
+  Pathnames with fewer elements, or whose names become empty after
+  stripping, are silently skipped and do not change the extraction
+  directory. Note that the pathname is edited after applying the
+  filter, but before security checks.
 - `umask` Filter the modes of entries like `process.umask()`.
 - `dmode` Default mode for directories
 - `fmode` Default mode for files
