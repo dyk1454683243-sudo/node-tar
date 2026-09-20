@@ -2901,6 +2901,405 @@ t.test('handle errors on fs.close', t => {
   })
 })
 
+t.test('strip does not mutate existing cwd (#294)', t => {
+  // GNU tar --strip-components skips members whose names become empty.
+  // node-tar used to apply the stripped directory's mode/owner/mtime
+  // to cwd, which is how `tar.x({strip:1})` as root could chown `.`.
+  const archiveMtime = new Date('2011-03-27T22:16:31.000Z')
+  const archiveUid = 2456124561
+  const archiveGid = 813708013
+
+  const dirOnly = makeTar([
+    {
+      path: 'dir/',
+      type: 'Directory',
+      mode: 0o700,
+      uid: archiveUid,
+      gid: archiveGid,
+      mtime: archiveMtime,
+    },
+    '',
+    '',
+  ])
+
+  const dirNoSlash = makeTar([
+    {
+      path: 'dir',
+      type: 'Directory',
+      mode: 0o700,
+      uid: archiveUid,
+      gid: archiveGid,
+      mtime: archiveMtime,
+    },
+    '',
+    '',
+  ])
+
+  const dirAndFile = makeTar([
+    {
+      path: 'dir/',
+      type: 'Directory',
+      mode: 0o700,
+      uid: archiveUid,
+      gid: archiveGid,
+      mtime: archiveMtime,
+    },
+    {
+      path: 'dir/file',
+      type: 'File',
+      size: 3,
+      uid: archiveUid,
+      gid: archiveGid,
+    },
+    'hi\n',
+    '',
+    '',
+  ])
+
+  const nested = makeTar([
+    {
+      path: 'pkg/',
+      type: 'Directory',
+      mode: 0o700,
+      uid: archiveUid,
+      gid: archiveGid,
+      mtime: archiveMtime,
+    },
+    {
+      path: 'pkg/sub/',
+      type: 'Directory',
+      mode: 0o750,
+      uid: archiveUid,
+      gid: archiveGid,
+      mtime: archiveMtime,
+    },
+    {
+      path: 'pkg/sub/n.txt',
+      type: 'File',
+      size: 1,
+    },
+    'x',
+    '',
+    '',
+  ])
+
+  const dottedPrefix = makeTar([
+    {
+      path: './keepme/',
+      type: 'Directory',
+      mode: 0o700,
+    },
+    {
+      path: './keepme/file',
+      type: 'File',
+      size: 1,
+    },
+    'z',
+    '',
+    '',
+  ])
+
+  const checkCwdUntouched = (t, cwd, before) => {
+    const after = fs.statSync(cwd)
+    t.equal(
+      after.mode & 0o7777,
+      before.mode & 0o7777,
+      'cwd mode unchanged',
+    )
+    t.equal(after.uid, before.uid, 'cwd uid unchanged')
+    t.equal(after.gid, before.gid, 'cwd gid unchanged')
+    t.not(
+      after.mtime.toISOString(),
+      archiveMtime.toISOString(),
+      'cwd mtime not taken from stripped directory',
+    )
+  }
+
+  const stubChown = t => {
+    const chown = fs.chown
+    const lchown = fs.lchown
+    const fchown = fs.fchown
+    const chownSync = fs.chownSync
+    const fchownSync = fs.fchownSync
+    const lchownSync = fs.lchownSync
+    const paths = []
+    const record = p => paths.push(normPath(String(p)))
+    fs.fchown =
+      fs.chown =
+      fs.lchown =
+        (p, _uid, _gid, cb) => {
+          record(p)
+          cb()
+        }
+    fs.chownSync =
+      fs.lchownSync =
+      fs.fchownSync =
+        p => {
+          record(p)
+        }
+    t.teardown(() => {
+      fs.chown = chown
+      fs.fchown = fchown
+      fs.lchown = lchown
+      fs.chownSync = chownSync
+      fs.fchownSync = fchownSync
+      fs.lchownSync = lchownSync
+    })
+    return paths
+  }
+
+  t.test('dir-only archive, trailing slash', t => {
+    t.plan(2)
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new UnpackSync({
+        cwd,
+        strip: 1,
+        chmod: true,
+        preserveOwner: true,
+      }).end(dirOnly)
+      checkCwdUntouched(t, cwd, before)
+      t.same(fs.readdirSync(cwd), [], 'stripped dir creates no children')
+      t.end()
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new Unpack({
+        cwd,
+        strip: 1,
+        chmod: true,
+        preserveOwner: true,
+      })
+        .on('end', () => {
+          checkCwdUntouched(t, cwd, before)
+          t.same(
+            fs.readdirSync(cwd),
+            [],
+            'stripped dir creates no children',
+          )
+          t.end()
+        })
+        .end(dirOnly)
+    })
+  })
+
+  t.test('dir-only archive, no trailing slash', t => {
+    t.plan(2)
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new UnpackSync({
+        cwd,
+        strip: 1,
+        chmod: true,
+      }).end(dirNoSlash)
+      checkCwdUntouched(t, cwd, before)
+      t.end()
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new Unpack({ cwd, strip: 1, chmod: true })
+        .on('end', () => {
+          checkCwdUntouched(t, cwd, before)
+          t.end()
+        })
+        .end(dirNoSlash)
+    })
+  })
+
+  t.test('preserveOwner does not chown cwd', t => {
+    t.plan(2)
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const paths = stubChown(t)
+      new UnpackSync({
+        cwd,
+        strip: 1,
+        preserveOwner: true,
+      }).end(dirAndFile)
+      t.equal(fs.readFileSync(cwd + '/file', 'utf8'), 'hi\n')
+      t.notOk(paths.includes(normPath(cwd)), 'chown never targets cwd')
+      t.end()
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const paths = stubChown(t)
+      new Unpack({
+        cwd,
+        strip: 1,
+        preserveOwner: true,
+      })
+        .on('end', () => {
+          t.equal(fs.readFileSync(cwd + '/file', 'utf8'), 'hi\n')
+          t.notOk(paths.includes(normPath(cwd)), 'chown never targets cwd')
+          t.end()
+        })
+        .end(dirAndFile)
+    })
+  })
+
+  t.test('remaining existing dir still gets metadata', t => {
+    t.plan(2)
+    const check = (t, cwd, before) => {
+      checkCwdUntouched(t, cwd, before)
+      t.equal(fs.readFileSync(cwd + '/sub/n.txt', 'utf8'), 'x')
+      t.equal(
+        fs.statSync(cwd + '/sub').mode & 0o777,
+        0o750,
+        'remaining dir mode applied',
+      )
+      t.end()
+    }
+    t.test('sync', t => {
+      const cwd = t.testdir({ sub: {} })
+      fs.chmodSync(cwd + '/sub', 0o755)
+      const before = fs.statSync(cwd)
+      new UnpackSync({ cwd, strip: 1, chmod: true }).end(nested)
+      check(t, cwd, before)
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({ sub: {} })
+      fs.chmodSync(cwd + '/sub', 0o755)
+      const before = fs.statSync(cwd)
+      new Unpack({ cwd, strip: 1, chmod: true })
+        .on('end', () => check(t, cwd, before))
+        .end(nested)
+    })
+  })
+
+  t.test('without strip, dir is extracted and cwd is not mutated', t => {
+    t.plan(2)
+    const check = (t, cwd, before) => {
+      t.equal(
+        fs.statSync(cwd).mode & 0o7777,
+        before.mode & 0o7777,
+        'cwd mode unchanged without strip',
+      )
+      t.ok(fs.statSync(cwd + '/dir').isDirectory())
+      t.equal(fs.statSync(cwd + '/dir').mode & 0o777, 0o700)
+      t.equal(
+        fs.statSync(cwd + '/dir').mtime.toISOString(),
+        archiveMtime.toISOString(),
+      )
+      t.end()
+    }
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new UnpackSync({ cwd, chmod: true }).end(dirOnly)
+      check(t, cwd, before)
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new Unpack({ cwd, chmod: true })
+        .on('end', () => check(t, cwd, before))
+        .end(dirOnly)
+    })
+  })
+
+  t.test('strip of ./prefix still extracts remaining name', t => {
+    t.plan(2)
+    const check = (t, cwd) => {
+      t.ok(fs.statSync(cwd + '/keepme').isDirectory())
+      t.equal(fs.readFileSync(cwd + '/keepme/file', 'utf8'), 'z')
+      t.end()
+    }
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      new UnpackSync({ cwd, strip: 1 }).end(dottedPrefix)
+      check(t, cwd)
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      new Unpack({ cwd, strip: 1 })
+        .on('end', () => check(t, cwd))
+        .end(dottedPrefix)
+    })
+  })
+
+  t.test('strip 2 of a/b/ does not mutate cwd', t => {
+    const twoDeep = makeTar([
+      {
+        path: 'a/b/',
+        type: 'Directory',
+        mode: 0o700,
+        mtime: archiveMtime,
+      },
+      {
+        path: 'a/b/c',
+        type: 'File',
+        size: 1,
+      },
+      'q',
+      '',
+      '',
+    ])
+    t.plan(2)
+    const check = (t, cwd, before) => {
+      checkCwdUntouched(t, cwd, before)
+      t.equal(fs.readFileSync(cwd + '/c', 'utf8'), 'q')
+      t.end()
+    }
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new UnpackSync({ cwd, strip: 2, chmod: true }).end(twoDeep)
+      check(t, cwd, before)
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new Unpack({ cwd, strip: 2, chmod: true })
+        .on('end', () => check(t, cwd, before))
+        .end(twoDeep)
+    })
+  })
+
+  t.test('strip leaving only . does not mutate cwd', t => {
+    const dotRemain = makeTar([
+      {
+        path: 'pre/.',
+        type: 'Directory',
+        mode: 0o700,
+        mtime: archiveMtime,
+      },
+      {
+        path: 'pre/file',
+        type: 'File',
+        size: 1,
+      },
+      'k',
+      '',
+      '',
+    ])
+    t.plan(2)
+    const check = (t, cwd, before) => {
+      checkCwdUntouched(t, cwd, before)
+      t.equal(fs.readFileSync(cwd + '/file', 'utf8'), 'k')
+      t.end()
+    }
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new UnpackSync({ cwd, strip: 1, chmod: true }).end(dotRemain)
+      check(t, cwd, before)
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new Unpack({ cwd, strip: 1, chmod: true })
+        .on('end', () => check(t, cwd, before))
+        .end(dotRemain)
+    })
+  })
+
+  t.end()
+})
+
 t.test('using strip option when top level file exists', t => {
   const data = makeTar([
     {

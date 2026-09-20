@@ -336,6 +336,12 @@ export class Unpack extends Parser {
         }
       }
       parts.splice(0, this.strip)
+      // GNU tar --strip-components skips members whose names become
+      // empty. Applying those entries would mutate cwd ownership,
+      // mode, and mtime (#294).
+      if (parts.every(part => part === '' || part === '.')) {
+        return false
+      }
       entry.path = parts.join('/')
     }
 
@@ -383,6 +389,8 @@ export class Unpack extends Parser {
 
     // an archive can set properties on the extraction directory, but it
     // may not replace the cwd with a different kind of thing entirely.
+    // Fully-stripped directory entries never reach here; they are
+    // skipped above so strip does not mutate cwd (#294).
     if (
       entry.absolute === this.cwd &&
       entry.type !== 'Directory' &&
