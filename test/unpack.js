@@ -3259,6 +3259,44 @@ t.test('strip does not mutate existing cwd (#294)', t => {
     })
   })
 
+  t.test('strip leaving only . does not mutate cwd', t => {
+    const dotRemain = makeTar([
+      {
+        path: 'pre/.',
+        type: 'Directory',
+        mode: 0o700,
+        mtime: archiveMtime,
+      },
+      {
+        path: 'pre/file',
+        type: 'File',
+        size: 1,
+      },
+      'k',
+      '',
+      '',
+    ])
+    t.plan(2)
+    const check = (t, cwd, before) => {
+      checkCwdUntouched(t, cwd, before)
+      t.equal(fs.readFileSync(cwd + '/file', 'utf8'), 'k')
+      t.end()
+    }
+    t.test('sync', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new UnpackSync({ cwd, strip: 1, chmod: true }).end(dotRemain)
+      check(t, cwd, before)
+    })
+    t.test('async', t => {
+      const cwd = t.testdir({})
+      const before = fs.statSync(cwd)
+      new Unpack({ cwd, strip: 1, chmod: true })
+        .on('end', () => check(t, cwd, before))
+        .end(dotRemain)
+    })
+  })
+
   t.end()
 })
 
