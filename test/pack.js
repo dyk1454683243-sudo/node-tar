@@ -1,6 +1,7 @@
 import t from 'tap'
 import { Pack, PackSync } from '../dist/esm/pack.js'
 import fs from 'fs'
+import net from 'net'
 import path, { resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { Parser } from '../src/parse.js'
@@ -1959,3 +1960,64 @@ t.test('avoid permanent link deferral', async t => {
     new Set(['pkgB/index.js', 'pkgB/foo.js', 'pkgB/dist/index.js']),
   )
 })
+
+t.test(
+  'skips sockets so a later file still packs (#295)',
+  { skip: isWindows && 'unix sockets', timeout: 8000 },
+  async t => {
+    const cwd = t.testdir({
+      'aaa.txt': 'hello\n',
+    })
+    const servers = await Promise.all(
+      ['b.sock', 'c.sock'].map(
+        name =>
+          new Promise((resolve, reject) => {
+            const server = net.createServer()
+            server.on('error', reject)
+            server.listen(path.join(cwd, name), () => resolve(server))
+          }),
+      ),
+    )
+    t.teardown(() => {
+      for (const server of servers) {
+        server.close()
+      }
+    })
+
+    const namesFrom = data => {
+      const names = []
+      for (let i = 0; i + 512 <= data.length; ) {
+        const block = data.subarray(i, i + 512)
+        if (block.every(b => b === 0)) {
+          break
+        }
+        const name = new Header(block).path
+        const size = new Header(block).size || 0
+        if (name) {
+          names.push(name)
+        }
+        i += 512 + 512 * Math.ceil(size / 512)
+      }
+      return names
+    }
+
+    const out = []
+    await new Promise((resolve, reject) => {
+      new Pack({ cwd })
+        .end('.')
+        .on('data', c => out.push(c))
+        .on('end', resolve)
+        .on('error', reject)
+    })
+    t.strictSame(namesFrom(Buffer.concat(out)).sort(), ['./', './aaa.txt'])
+
+    const sync = new PackSync({ cwd })
+    const sout = []
+    sync.on('data', c => sout.push(c))
+    sync.end('.')
+    t.strictSame(namesFrom(Buffer.concat(sout)).sort(), [
+      './',
+      './aaa.txt',
+    ])
+  },
+)

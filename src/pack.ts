@@ -413,6 +413,21 @@ export class Pack
       return
     }
 
+    // Sockets, FIFOs, and device nodes are not packed (GNU tar skips
+    // sockets). WriteEntry treats them as Unsupported and ends with no
+    // header, so 'end' fires while the job is still read-ahead.
+    // JOBDONE always shift()s the queue head, which then drops the
+    // current file and stalls create() when two such entries follow a
+    // regular file (#295).
+    if (
+      !job.stat.isFile() &&
+      !job.stat.isDirectory() &&
+      !job.stat.isSymbolicLink()
+    ) {
+      job.ignore = true
+      return
+    }
+
     if (!this.noDirRecurse && job.stat.isDirectory() && !job.readdir) {
       const rc = this.readdirCache.get(job.absolute)
       if (rc) {
